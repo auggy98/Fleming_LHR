@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LHR Pro Lab - Speed Magnitude Adjusted</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background-color: #fcfcfc; }
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(255, 255, 255, 0.95); padding: 20px;
+            border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            z-index: 10; width: 280px; border: 1px solid #ddd;
+        }
+        h3 { margin: 0 0 10px 0; font-size: 18px; color: #111; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .control-row { margin-bottom: 12px; }
+        label { display: block; font-size: 11px; font-weight: bold; margin-bottom: 5px; color: #666; text-transform: uppercase; }
+        button { 
+            display: block; width: 100%; margin-bottom: 8px; padding: 12px; 
+            cursor: pointer; font-weight: bold; border: none; border-radius: 6px;
+            font-size: 13px; transition: all 0.2s;
+        }
+        .btn-ctrl { background: #2c3e50; color: white; }
+        #fieldBtn { background: #3498db; color: white; }
+        #pauseBtn { background: #d35400; color: white; margin-top: 5px; }
+        #pauseBtn.paused { background: #27ae60; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        .legend { margin-top: 15px; font-size: 13px; line-height: 1.8; color: #222; border-top: 1px solid #eee; padding-top: 10px;}
+        .color-box { display: inline-block; width: 12px; height: 12px; margin-right: 10px; border-radius: 2px; vertical-align: middle; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h3>LHR Dipole Lab</h3>
+        <div class="control-row">
+            <button class="btn-ctrl" onclick="toggleCurrent()">Flip Battery Polarity</button>
+            <button class="btn-ctrl" onclick="toggleMagnet()">Flip Magnet (N/S)</button>
+            <button id="fieldBtn" onclick="toggleFieldLines()">Toggle Flux Lines</button>
+        </div>
+        <div class="control-row">
+            <label>Spin Speed</label>
+            <input type="range" id="speedSlider" min="0" max="400" value="200">
+        </div>
+        <button id="pauseBtn" onclick="togglePause()">Pause Simulation</button>
+        <div class="legend">
+            <span class="color-box" style="background: #0044ff;"></span> Index: Field (B)<br>
+            <span class="color-box" style="background: #ff00ff;"></span> Middle: Current (I)<br>
+            <span class="color-box" style="background: #cc0000;"></span> Thumb: Force (F)
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls, raycaster;
+        let wireFrame, magnetGroup, fieldLinesGroup, handle;
+        let arrowI, arrowB, arrowF;
+        let fluxArrows = [];
+        
+        let currentPolarity = -1; 
+        let magnetPolarity = 1;  
+        let isPaused = false;
+        let rotationAngle = 0;
+        let handleT = 0.6; 
+        let isDragging = false;
+
+        const colors = {
+            field: 0x5599ff, current: 0xff00ff, force: 0xcc0000,
+            wire: 0xb87333, north: 0xff2222, south: 0x2244ff
+        };
+
+        const wireCurve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(0, 62, 0),
+            new THREE.Vector3(75, 62, 0),
+            new THREE.Vector3(75, -70, 0),
+            new THREE.Vector3(35, -70, 0)
+        ], false, 'catmullrom', 0.1);
+
+        init();
+        animate();
+
+        function createTextSprite(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 128; canvas.height = 128;
+            ctx.fillStyle = 'white'; ctx.font = 'bold 90px Arial';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(text, 64, 64);
+            const texture = new THREE.CanvasTexture(canvas);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+            sprite.scale.set(16, 16, 1);
+            return sprite;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xffffff);
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 2000);
+            camera.position.set(300, 200, 400);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            raycaster = new THREE.Raycaster();
+            scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+
+            // --- BATTERY & MAGNET ---
+            const bat = new THREE.Group();
+            bat.add(new THREE.Mesh(new THREE.CylinderGeometry(22, 22, 110, 32), new THREE.MeshStandardMaterial({ color: 0x222222 })));
+            const tip = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 8, 16), new THREE.MeshStandardMaterial({ color: 0xffaa00 }));
+            tip.position.y = 58; bat.add(tip);
+            scene.add(bat);
+
+            magnetGroup = new THREE.Group();
+            const nPole = new THREE.Mesh(new THREE.CylinderGeometry(32, 32, 12, 32), new THREE.MeshStandardMaterial({ color: colors.north }));
+            const sPole = new THREE.Mesh(new THREE.CylinderGeometry(32, 32, 12, 32), new THREE.MeshStandardMaterial({ color: colors.south }));
+            nPole.position.y = 6; sPole.position.y = -6;
+            nPole.add(createTextSprite('N')).children[0].position.z = 33;
+            sPole.add(createTextSprite('S')).children[0].position.z = 33;
+            magnetGroup.add(nPole, sPole);
+            magnetGroup.position.y = -70;
+            scene.add(magnetGroup);
+
+            // --- FIELD LINES ---
+            fieldLinesGroup = new THREE.Group();
+            const fieldMat = new THREE.LineBasicMaterial({ color: colors.field, transparent: true, opacity: 0.25 });
+            
+            for(let layer = 1; layer <= 8; layer++) {
+                const R = 35 + layer * 25; 
+                for(let angle = 0; angle < Math.PI * 2; angle += Math.PI / 8) {
+                    const points = [];
+                    const cosA = Math.cos(angle); const sinA = Math.sin(angle);
+                    for(let theta = 0.05; theta < Math.PI - 0.05; theta += 0.08) {
+                        const r = R * Math.pow(Math.sin(theta), 2);
+                        const x = r * Math.sin(theta) * cosA;
+                        const y = r * Math.cos(theta);
+                        const z = r * Math.sin(theta) * sinA;
+                        const pos = new THREE.Vector3(x, y - 70, z);
+                        points.push(pos);
+
+                        if (Math.random() < 0.04) {
+                            const arrow = new THREE.ArrowHelper(new THREE.Vector3(0,1,0), pos, 7, colors.field, 4, 3);
+                            fluxArrows.push(arrow);
+                            fieldLinesGroup.add(arrow);
+                        }
+                    }
+                    fieldLinesGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), fieldMat));
+                }
+            }
+            scene.add(fieldLinesGroup);
+
+            // --- WIRE ---
+            wireFrame = new THREE.Group();
+            const wireMesh = new THREE.Mesh(new THREE.TubeGeometry(wireCurve, 64, 3, 12, false), new THREE.MeshStandardMaterial({ color: colors.wire, metalness: 0.8 }));
+            const wireLeft = wireMesh.clone(); wireLeft.scale.x = -1;
+            wireFrame.add(wireMesh, wireLeft);
+            scene.add(wireFrame);
+
+            // --- HANDLE & ARROWS ---
+            handle = new THREE.Mesh(new THREE.SphereGeometry(6), new THREE.MeshStandardMaterial({ color: 0xffff00 }));
+            wireFrame.add(handle);
+            arrowI = new THREE.ArrowHelper(new THREE.Vector3(), new THREE.Vector3(), 50, colors.current, 15, 8);
+            arrowB = new THREE.ArrowHelper(new THREE.Vector3(), new THREE.Vector3(), 50, colors.field, 15, 8);
+            arrowF = new THREE.ArrowHelper(new THREE.Vector3(), new THREE.Vector3(), 60, colors.force, 18, 10);
+            wireFrame.add(arrowI, arrowB, arrowF);
+
+            // UI
+            window.addEventListener('pointerdown', (e) => {
+                const m = new THREE.Vector2((e.clientX/window.innerWidth)*2-1, -(e.clientY/window.innerHeight)*2+1);
+                raycaster.setFromCamera(m, camera);
+                if (raycaster.intersectObject(handle).length > 0) { isDragging = true; controls.enabled = false; }
+            });
+            window.addEventListener('pointermove', (e) => {
+                if (isDragging) handleT = THREE.MathUtils.clamp(handleT + (e.movementY * 0.0035), 0, 1);
+            });
+            window.addEventListener('pointerup', () => { isDragging = false; controls.enabled = true; });
+            
+            window.toggleCurrent = () => currentPolarity *= -1;
+            window.toggleMagnet = () => magnetPolarity *= -1;
+            window.toggleFieldLines = () => fieldLinesGroup.visible = !fieldLinesGroup.visible;
+            window.togglePause = () => {
+                isPaused = !isPaused;
+                document.getElementById('pauseBtn').innerText = isPaused ? "Resume Simulation" : "Pause Simulation";
+                document.getElementById('pauseBtn').className = isPaused ? "paused" : "";
+            };
+        }
+
+        function getMagneticFieldAt(point) {
+            const rVec = new THREE.Vector3(point.x, point.y + 70, point.z);
+            const rMag = rVec.length();
+            if (rMag < 10) return new THREE.Vector3(0, 0, 0); 
+            const m = new THREE.Vector3(0, magnetPolarity * 1500000, 0); 
+            const mDotR = m.dot(rVec);
+            const term1 = rVec.clone().multiplyScalar(3 * mDotR / Math.pow(rMag, 5));
+            const term2 = m.clone().divideScalar(Math.pow(rMag, 3));
+            return term1.sub(term2);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            magnetGroup.rotation.x = magnetPolarity === 1 ? 0 : Math.PI;
+
+            fluxArrows.forEach(a => {
+                const bDir = getMagneticFieldAt(a.position).normalize();
+                if (bDir.length() > 0) a.setDirection(bDir);
+            });
+
+            const point = wireCurve.getPointAt(handleT);
+            const tangent = wireCurve.getTangentAt(handleT).normalize();
+            handle.position.copy(point);
+
+            const vecI = tangent.clone().multiplyScalar(currentPolarity);
+            const vecB = getMagneticFieldAt(point);
+            const vecF = new THREE.Vector3().crossVectors(vecI, vecB);
+
+            arrowI.position.copy(point); arrowB.position.copy(point); arrowF.position.copy(point);
+            arrowI.setDirection(vecI.normalize());
+            if (vecB.length() > 0) arrowB.setDirection(vecB.normalize());
+            if (vecF.length() > 0) arrowF.setDirection(vecF.normalize());
+            
+            arrowB.visible = arrowF.visible = vecB.length() > 0.001;
+
+            if (!isPaused) {
+                // Reduced speed magnitude multiplier here (0.05 -> 0.01)
+                const speedMult = document.getElementById('speedSlider').value / 100;
+                const driveP = wireCurve.getPointAt(0.92);
+                const driveI = wireCurve.getTangentAt(0.92).multiplyScalar(currentPolarity);
+                const driveB = getMagneticFieldAt(driveP);
+                const driveF = new THREE.Vector3().crossVectors(driveI, driveB);
+                
+                const torqueY = -driveF.z * (0.01 * speedMult);
+                rotationAngle += torqueY;
+                wireFrame.rotation.y = rotationAngle;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
